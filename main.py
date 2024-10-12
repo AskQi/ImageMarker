@@ -11,36 +11,11 @@ import numpy as np
 import rawpy
 from imutils import face_utils
 
+from logger import HiLogger
 from safe_dict import ThreadSafeQueueDict
+from time_cost import time_cost
 
-
-class ColoredFormatter(logging.Formatter):
-    COLORS = {
-        'DEBUG': '\033[94m',  # Blue
-        'INFO': '\033[92m',  # Green
-        'WARNING': '\033[93m',  # Yellow
-        'ERROR': '\033[91m',  # Red
-        'CRITICAL': '\033[95m',  # Magenta
-    }
-
-    RESET = '\033[0m'
-
-    def format(self, record):
-        log_fmt = f"{self.COLORS.get(record.levelname, self.RESET)}%(asctime)s.%(msecs)03d - %(levelname)s - %(threadName)s - %(message)s{self.RESET}"
-        formatter = logging.Formatter(log_fmt, datefmt='%Y-%m-%d %H:%M:%S')
-        return formatter.format(record)
-
-
-# 创建一个日志记录器
-logger = logging.getLogger(__name__)
-handler = logging.StreamHandler()
-
-# 设置自定义的颜色格式化器
-formatter = ColoredFormatter('%(levelname)s: %(message)s')
-handler.setFormatter(formatter)
-
-logger.addHandler(handler)
-logger.setLevel(logging.DEBUG)
+logger = HiLogger(__name__, 'ImageMarker')
 
 # dlib的人脸检测器和形状预测器模型
 detectors = ThreadSafeQueueDict()
@@ -91,7 +66,7 @@ def resize_image(image, max_width=1920, max_height=1080):
     new_width = int(width * scale)
     new_height = int(height * scale)
 
-    logger.info(f'resize image {width}x{height} to {new_width}x{new_height}, scale={scale}')
+    logger.debug(f'resize image {width}x{height} to {new_width}x{new_height}, scale={scale}')
 
     # 调整图像大小
     resized_image = cv2.resize(image, (new_width, new_height), interpolation=cv2.INTER_AREA)
@@ -191,6 +166,7 @@ def scan_directory_and_score_images(directory, max_workers):
     return results
 
 
+@time_cost
 def main(directory, max_workers=16):
     # 遍历目录中的所有JPG文件
     results = scan_directory_and_score_images(directory, max_workers)
