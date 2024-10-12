@@ -1,5 +1,4 @@
 from icrawler.builtin import GoogleImageCrawler
-from icrawler.crawler import Crawler
 from icrawler.downloader import ImageDownloader
 
 
