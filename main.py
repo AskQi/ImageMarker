@@ -1,13 +1,17 @@
+import logging
 import os
 import shutil
+import threading
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-import rawpy
 import cv2
 import dlib
 import numpy as np
+import rawpy
 from imutils import face_utils
-import logging
+
+from safe_dict import ThreadSafeQueueDict
 
 
 class ColoredFormatter(logging.Formatter):
@@ -22,7 +26,7 @@ class ColoredFormatter(logging.Formatter):
     RESET = '\033[0m'
 
     def format(self, record):
-        log_fmt = f"{self.COLORS.get(record.levelname, self.RESET)}%(asctime)s.%(msecs)03d - %(levelname)s - %(message)s{self.RESET}"
+        log_fmt = f"{self.COLORS.get(record.levelname, self.RESET)}%(asctime)s.%(msecs)03d - %(levelname)s - %(threadName)s - %(message)s{self.RESET}"
         formatter = logging.Formatter(log_fmt, datefmt='%Y-%m-%d %H:%M:%S')
         return formatter.format(record)
 
@@ -38,9 +42,9 @@ handler.setFormatter(formatter)
 logger.addHandler(handler)
 logger.setLevel(logging.DEBUG)
 
-# 初始化dlib的人脸检测器和形状预测器模型
-detector = dlib.get_frontal_face_detector()
-predictor = dlib.shape_predictor('model/shape_predictor_68_face_landmarks.dat')
+# dlib的人脸检测器和形状预测器模型
+detectors = ThreadSafeQueueDict()
+predictors = ThreadSafeQueueDict()
 
 
 def eye_aspect_ratio(eye):
@@ -59,11 +63,15 @@ def is_eyes_closed(eye):
 
 
 def get_image(file_path):
-    if file_path.lower().endswith(('.jpg', '.jpeg', '.png')):
-        return cv2.imread(file_path)
-    if file_path.lower().endswith('.cr3'):
-        with rawpy.imread(file_path) as raw:
-            return raw.postprocess()
+    try:
+        logger.debug(f'get_image: {file_path}')
+        if file_path.lower().endswith(('.jpg', '.jpeg', '.png')):
+            return cv2.imread(file_path)
+        if file_path.lower().endswith('.cr3'):
+            with rawpy.imread(file_path) as raw:
+                return raw.postprocess()
+    except Exception as e:
+        logging.error(f"get_image error: {e}", exc_info=True)
     logger.debug(f'not supported file type: {file_path}')
     return None
 
@@ -90,21 +98,45 @@ def resize_image(image, max_width=1920, max_height=1080):
     return resized_image
 
 
+def get_or_create_detector(key):
+    instance = detectors.get(key)
+    if instance is None:
+        logger.debug(f'create detector: {key}')
+        instance = dlib.get_frontal_face_detector()
+        detectors.set(key, instance)
+    return instance
+
+
+def get_or_create_predictor(key):
+    instance = predictors.get(key)
+    if instance is None:
+        logger.debug(f'create predictor: {key}')
+        instance = dlib.shape_predictor('model/shape_predictor_68_face_landmarks.dat')
+        predictors.set(key, instance)
+    return instance
+
+
 def process_image(file_path):
+    logger.debug(f"process {file_path} start")
     image = get_image(file_path)
     if image is None:
         logger.debug(f"Cannot read image: {file_path}")
-        return -1
+        return file_path, -1
+    logger.debug(f'get_image success: {file_path}')
     image = resize_image(image)
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    logger.debug(f'gray success: {file_path}')
+    # 初始化dlib的人脸检测器和形状预测器模型
+    detector = get_or_create_detector(threading.get_ident())
     faces = detector(gray, 1)
     face_num = len(faces)
+    logger.debug(f'face_num: {face_num}')
     if face_num == 0:
         logger.info(f'No face detected: {file_path}')
-        return -2
+        return file_path, -2
     if face_num >= 3:
         logger.warning(f'More than 2 face detected, not support: {file_path}');
-        return -3
+        return file_path, -3
 
     has_eye_close = has_any_eye_close(faces, gray)
 
@@ -112,9 +144,11 @@ def process_image(file_path):
     if has_eye_close:
         logger.info(f'Eye closed, will mark {file_path} score as 1')
         mark_score_1(file_path)
-    return 1 if has_eye_close else 0
+    return file_path, 1 if has_eye_close else 0
+
 
 def has_any_eye_close(faces, gray):
+    predictor = get_or_create_predictor(threading.get_ident())
     for face in faces:
         shape = predictor(gray, face)
         shape = face_utils.shape_to_np(shape)
@@ -134,21 +168,32 @@ def mark_score_1(photo_path):
     xmp_file = os.path.splitext(photo_path)[0] + '.xmp'
     shutil.copy2('templates/mark1.xmp', xmp_file)
 
-def scan_directory_and_score_images(directory):
+
+def scan_directory_and_score_images(directory, max_workers):
     results = {}
-    # 扫描指定目录及其子目录
-    for root, _, files in os.walk(directory):
-        for file in files:
-            if not file.lower().endswith(('.jpg', '.jpeg', '.png', '.cr3')):
-                continue
-            file_path = os.path.join(root, file)
-            logger.debug(f"process {file_path} start")
-            results[file_path] = process_image(file_path)
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # 创建任务列表
+        futures = []
+        # 扫描指定目录及其子目录
+        for root, _, files in os.walk(directory):
+            for file in files:
+                if not file.lower().endswith(('.jpg', '.jpeg', '.png', '.cr3')):
+                    continue
+                file_path = os.path.join(root, file)
+                logger.debug(f'submit file_path: {file_path}')
+                future = executor.submit(process_image, file_path)
+                futures.append(future)
+
+        # 处理已完成的任务
+        for future in as_completed(futures):
+            file_path, result = future.result()  # 获取任务返回结果
+            results[file_path] = result
     return results
 
-def main(directory):
+
+def main(directory, max_workers=16):
     # 遍历目录中的所有JPG文件
-    results = scan_directory_and_score_images(directory)
+    results = scan_directory_and_score_images(directory, max_workers)
     # 映射结果代码到错误原因
     error_reasons = {
         0: "未检测到闭眼",
@@ -176,4 +221,4 @@ def main(directory):
 if __name__ == "__main__":
     logger.info('start')
     directory = 'data/'
-    main(directory)
+    main(directory, 32)
