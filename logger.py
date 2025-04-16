@@ -45,7 +45,7 @@ class HiLogger:
             os.makedirs(LOGS_DIR)
         # 获取当前时间并格式化
         now = datetime.now()
-        log_file = now.strftime(f"{log_file_prefix}_%Y-%m-%d_%H:%M:%S.log")
+        log_file = now.strftime(f"{log_file_prefix}_%Y-%m-%d_%H-%M-%S.log")
         # 创建文件处理器
         file_handler = logging.FileHandler(os.path.join(LOGS_DIR, log_file))
         file_handler.setLevel(LOG_LEVEL)
